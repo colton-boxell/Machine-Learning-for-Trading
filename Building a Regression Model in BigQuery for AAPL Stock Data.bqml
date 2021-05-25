@@ -1,0 +1,118 @@
+###Lab Queries for predicting Apple Stock###
+'''Runs in BigQuery inside the Google Cloud Console'''
+
+#First create a table to host the data
+'''Load Data from Google Cloud Storage into BigQuery
+In the BigQuery navigation menu on the left-hand side select your project id.
+On the right side click on CREATE DATASET.
+In the menu that results, enter the following values and then click Create dataset:
+Dataset ID: ai4f
+Default table expiration: Never
+Encryption: Google-managed key
+Once the dataset is created it will be listed in the navigation menu under your project id. Click on ai4f.
+On the right side click on CREATE TABLE.
+In the menu that results, enter the following values and then click Create table (items not specified should be left at their defaults):
+Create table from: Google Cloud Storage
+Select file from GCS bucket: cloud-training/ai4f/AAPL10Y.csv
+Table name: AAPL10Y
+Auto detect: Schema and input parameters
+You can view the table's schema by selecting it from the left-hand menu and clicking on the Schema tab.'''
+
+# Qeury 1: MinMax Dates
+SELECT
+  MIN(date) AS min_date,
+  MAX(date) AS max_date
+FROM
+  `ai4f.AAPL10Y`
+
+
+#Query 2: Yearly Average Closing
+SELECT
+  EXTRACT(year FROM date) AS year,
+  AVG(close) AS avg_close
+FROM
+  `ai4f.AAPL10Y`
+GROUP BY
+  year
+ORDER BY
+  year DESC
+
+#Query 3: Greatest stock increase by date
+SELECT
+  date,
+  100.0 * close / LAG(close, 1) OVER(ORDER BY date) AS pct_close_change
+FROM
+  `ai4f.AAPL10Y`
+ORDER BY
+  pct_close_change DESC
+LIMIT
+  5
+
+#Query 4: Regression model feature creation
+WITH
+  raw AS (
+  SELECT
+    date,
+    close,
+    LAG(close, 1) OVER(ORDER BY date) AS min_1_close,
+    LAG(close, 2) OVER(ORDER BY date) AS min_2_close,
+    LAG(close, 3) OVER(ORDER BY date) AS min_3_close,
+    LAG(close, 4) OVER(ORDER BY date) AS min_4_close
+  FROM
+    `ai4f.AAPL10Y`
+  ORDER BY
+    date DESC ),
+  raw_plus_trend AS (
+  SELECT
+    date,
+    close,
+    min_1_close,
+    IF (min_1_close - min_2_close > 0, 1, -1) AS min_1_trend,
+    IF (min_2_close - min_3_close > 0, 1, -1) AS min_2_trend,
+    IF (min_3_close - min_4_close > 0, 1, -1) AS min_3_trend
+  FROM
+    raw ),
+  ml_data AS (
+  SELECT
+    date,
+    close,
+    min_1_close AS day_prev_close,
+    IF (min_1_trend + min_2_trend + min_3_trend > 0, 1, -1) AS trend_3_day
+  FROM
+    raw_plus_trend )
+SELECT
+  *
+FROM
+  ml_data
+
+#Query 5: Build Linear Regression Model
+CREATE OR REPLACE MODEL `ai4f.aapl_model`
+OPTIONS
+  ( model_type='linear_reg',
+    input_label_cols=['close'],
+    data_split_method='seq',
+    data_split_eval_fraction=0.3,
+    data_split_col='date') AS
+SELECT
+  date,
+  close,
+  day_prev_close,
+  trend_3_day
+FROM
+  `ai4f.model_data`
+
+#Query 6: Evaluation Metrics
+SELECT * FROM ML.EVALUATE(MODEL `ai4f.aapl_model`)
+
+#Query 7: Predicting Close
+SELECT
+  *
+FROM
+  ml.PREDICT(MODEL `ai4f.aapl_model`,
+    (
+    SELECT
+      *
+    FROM
+      `ai4f.model_data`
+    WHERE
+      date >= '2019-01-01') )
